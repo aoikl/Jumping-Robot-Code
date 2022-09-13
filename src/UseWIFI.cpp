@@ -5,6 +5,57 @@
 
 [------------------------------------------------]*/
 #include <Arduino.h>
+#include <AsyncElegantOTA.h>
+#include <AsyncTCP.h>
+#include <ESPAsyncWebServer.h>
+#include <WiFi.h>
+const char* ssid = "ご注文はWIFIですか?";
+const char* password = "111111111";
+const char compile_date[] = __DATE__ " " __TIME__;  // Provided by compiler at compile time.
+String readBuff = "", readBuff_subStr = "";         //客戶端讀取用緩存
+int readBuff_Int = 0;
+uint8_t WifiTryCount = 0;
+WiFiServer TCPclient_server(443);  //聲明服務器對象
+WiFiClient client = TCPclient_server.available();
+AsyncWebServer OTA_server(80);
+#define LED_BUTTON 22
+void WIFI_Init() {
+    pinMode(LED_BUTTON, OUTPUT);  // LED_BUTTON
+    WiFi.mode(WIFI_STA);
+    WiFi.setSleep(false);  //關閉STA模式下WIFI休眠，提高響應速度
+    WiFi.disconnect();
+    delay(250);
+    WiFi.begin(ssid, password);
+    // Wait for connection
+    while (WiFi.status() != WL_CONNECTED) {
+        Serial.print('.');
+        delay(250);
+        if (WifiTryCount++ >= 20) {  //嘗試20次未連上網，重新啟動
+            ESP.restart();
+        }
+    }
+    Serial.println("[Connected]");
+    Serial.println("Local IP:");
+    Serial.print(WiFi.localIP());
+    Serial.print(":");
+    Serial.println(443);
+    AsyncElegantOTA.begin(&OTA_server);  // Start ElegantOTA
+    OTA_server.begin();
+    TCPclient_server.begin();
+    TCPclient_server.setNoDelay(true);
+    while (!client) {  //  等待連接
+        client = TCPclient_server.available();
+        digitalWrite(LED_BUTTON, HIGH);
+        delay(100);
+        digitalWrite(LED_BUTTON, LOW);
+        delay(100);
+    }
+    delay(100);
+    digitalWrite(LED_BUTTON, LOW);
+    client.println("=>[Client connented]");
+    client.println("Compile timestamp: ");
+    client.println(compile_date);
+}
 /*[------------------------------------------------]
 
     ESP32 position motion control example with magnetic sensor
@@ -31,7 +82,7 @@ SCL0 - SCK(CLK)
 I0& I1 - SS*/
 MagneticSensorSPI sensor1 = MagneticSensorSPI(15, 14, 0x3FFF);  //(ss,bit resolution,Register address) motor1
 
-Commander command = Commander(Serial);
+Commander command = Commander(client);
 void doMotor1(char* cmd) {
     command.motor(&motor1, cmd);
 }
@@ -41,7 +92,7 @@ void doMotor1(char* cmd) {
 
 [------------------------------------------------]*/
 void FOC() {
-    while (1) {
+    while (client.connected()) {
         //  main FOC algorithm function
         motor1.loopFOC();
         motor1.move();
@@ -70,6 +121,7 @@ void FOC() {
 
 void setup() {
     Serial.begin(115200);
+    WIFI_Init();
     //  initialize encoder sensor hardware
     sensor1.init();
     // link the motor to the sensor
@@ -116,17 +168,28 @@ void setup() {
     // initialize motor
     motor1.init();
     // align encoder and start FOC
-    motor1.initFOC(0.93, Direction::CW);  // motor.initFOC(Zero elec. angle:offset, direction) ex:(2.33,Direction::CCW)
+    motor1.initFOC();  // motor.initFOC(Zero elec. angle:offset, direction) ex:(2.33,Direction::CCW)
 
     command.add('A', doMotor1, "motor1");
     // comment out if not needed
-    motor1.useMonitoring(Serial);
+    motor1.useMonitoring(client);
     // 下采样
-    //motor1.monitor_downsample = 100;
+    // motor1.monitor_downsample = 100;
     Serial.println("Motor ready.");
     _delay(1000);
 }
 
 void loop() {
-    FOC();
+    while (client.connected()) {  //如果客戶端處於連接狀態
+        if (client.available()) {
+            readBuff = client.readStringUntil('\n');
+            if (readBuff.startsWith("AUTO")) {  // 模式切換
+
+            } else if (readBuff.startsWith("FOC")) {
+                FOC();
+            }
+        }
+    }
+    delay(100);
+    ESP.restart();
 }
